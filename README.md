@@ -29,13 +29,17 @@ User Input → PII Scrubbing → TF-IDF Vectorization → Classifier → Verdict
 git clone https://github.com/nyrinthai/AI-Email-Fraud-Detection.git
 cd AI-Email-Fraud-Detection
 
-# 2. Install dependencies
+# 2. Create and activate a virtual environment (recommended)
+python -m venv .venv
+source .venv/bin/activate  # On Windows use: .venv\Scripts\activate
+
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 3. Add model artifacts (get these from the Model Builder)
+# 4. Add model artifacts (get these from the Model Builder)
 #    Place model.pkl and vectorizer.pkl in:  model/artifacts/
 
-# 4. Run the app
+# 5. Run the app
 streamlit run app/streamlit_app.py
 ```
 
