@@ -1,0 +1,21 @@
+# Model artifacts (too large for git — use Drive backup or Git LFS)
+model/artifacts/model.pkl
+model/artifacts/vectorizer.pkl
+
+# Datasets
+data/raw/
+data/processed/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+.venv/
+
+# Jupyter / Colab
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
