@@ -1,0 +1,626 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    },
+    "colab": {
+      "provenance": [],
+      "machine_shape": "hm",
+      "gpuType": "T4"
+    },
+    "accelerator": "GPU"
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "# Phishing Email Detection \u2014 Core Model Builder\n",
+        "**CECS 458 \u2014 Team 10 \u2014 Phase 4**\n",
+        "\n",
+        "This notebook trains a phishing-email classifier and saves two files (`model.pkl` and `vectorizer.pkl`).\n",
+        "\n",
+        "**How to run:** Execute cells top to bottom, one at a time."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "from google.colab import drive\n",
+        "drive.mount('/content/drive')"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 1 \u2014 Install libraries"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "!pip install kagglehub joblib scikit-learn pandas numpy matplotlib seaborn shap --quiet\n",
+        "print(\"Libraries installed.\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 2 \u2014 Paste your Kaggle API token\n",
+        "\n",
+        "On kaggle.com \u2192 Settings \u2192 API, copy the token string starting with `KGAT_`.\n",
+        "Run the cell below and paste it when prompted."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "import os, getpass\n",
+        "\n",
+        "token = getpass.getpass('Paste your Kaggle API token (starts with KGAT_): ').strip()\n",
+        "os.environ['KAGGLE_API_TOKEN'] = token\n",
+        "os.makedirs('/root/.config/kaggle', exist_ok=True)\n",
+        "print(\"Kaggle token set.\")\n",
+        "print(f\"Token starts with: {token[:8]}...  (length: {len(token)})\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 3 \u2014 Mount Google Drive"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "from google.colab import drive\n",
+        "drive.mount('/content/drive')\n",
+        "\n",
+        "os.makedirs('/content/drive/MyDrive/phishing_detector', exist_ok=True)\n",
+        "print(\"Drive mounted.\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 4 \u2014 Download datasets"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "import kagglehub\n",
+        "\n",
+        "path1 = kagglehub.dataset_download('naserabdullahalam/phishing-email-dataset')\n",
+        "path2 = kagglehub.dataset_download('francescogreco97/human-llm-generated-phishing-legitimate-emails')\n",
+        "\n",
+        "print(\"Dataset 1 files:\", os.listdir(path1))\n",
+        "print(\"Dataset 2 files:\", os.listdir(path2))"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 5 \u2014 Load datasets"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "import pandas as pd\n",
+        "\n",
+        "# Dataset 1\n",
+        "csvs1 = [f for f in os.listdir(path1) if f.endswith('.csv')]\n",
+        "preferred = ['phishing_email.csv', 'Phishing_Email.csv', 'phishing_emails.csv']\n",
+        "file1 = next((f for f in preferred if f in csvs1), csvs1[0])\n",
+        "df1_raw = pd.read_csv(os.path.join(path1, file1))\n",
+        "print(f\"Dataset 1: {file1}  shape={df1_raw.shape}  cols={list(df1_raw.columns)}\")\n",
+        "\n",
+        "# Dataset 2 \u2014 robust loader across all four sub-files\n",
+        "def robust_read(path):\n",
+        "    for kwargs in [{}, {'engine': 'python', 'on_bad_lines': 'skip'}]:\n",
+        "        try:\n",
+        "            return pd.read_csv(path, **kwargs)\n",
+        "        except Exception:\n",
+        "            continue\n",
+        "    raise ValueError(f\"Could not parse {path}\")\n",
+        "\n",
+        "dfs = []\n",
+        "for folder, fname, lval in [\n",
+        "    ('human-generated', 'legit.csv', 0),\n",
+        "    ('human-generated', 'phishing.csv', 1),\n",
+        "    ('llm-generated',   'legit.csv', 0),\n",
+        "    ('llm-generated',   'phishing.csv', 1),\n",
+        "]:\n",
+        "    full = os.path.join(path2, folder, fname)\n",
+        "    tmp = robust_read(full)\n",
+        "    tmp['label'] = lval\n",
+        "    tmp['source'] = folder\n",
+        "    dfs.append(tmp)\n",
+        "    print(f\"  {folder}/{fname}: {len(tmp)} rows -> label={lval}\")\n",
+        "\n",
+        "df2_raw = pd.concat(dfs, ignore_index=True)\n",
+        "print(f\"\\nDataset 2 total: {df2_raw.shape}\")\n",
+        "print(df2_raw.groupby(['source', 'label']).size())"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 6 \u2014 Normalize both datasets into a unified format"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "def find_text_column(df):\n",
+        "    candidates = ['text', 'Email Text', 'email', 'body', 'content', 'message']\n",
+        "    for c in candidates:\n",
+        "        if c in df.columns:\n",
+        "            return c\n",
+        "    str_cols = df.select_dtypes(include='object').columns\n",
+        "    return max(str_cols, key=lambda c: df[c].astype(str).str.len().mean())\n",
+        "\n",
+        "def find_label_column(df):\n",
+        "    candidates = ['label', 'Email Type', 'class', 'type', 'category', 'is_phishing']\n",
+        "    for c in candidates:\n",
+        "        if c in df.columns:\n",
+        "            return c\n",
+        "    for c in df.columns:\n",
+        "        if df[c].nunique() == 2:\n",
+        "            return c\n",
+        "    raise ValueError(\"Can't find label column\")\n",
+        "\n",
+        "def normalize(df, name):\n",
+        "    tcol = find_text_column(df)\n",
+        "    lcol = find_label_column(df)\n",
+        "    print(f\"{name}: text='{tcol}', label='{lcol}'\")\n",
+        "    print(f\"  Unique label values: {df[lcol].unique()[:10]}\")\n",
+        "\n",
+        "    def to_binary(v):\n",
+        "        if isinstance(v, (int, float)):\n",
+        "            return int(v)\n",
+        "        s = str(v).lower().strip()\n",
+        "        if any(k in s for k in ['phish', 'spam', 'fraud', 'malicious']):\n",
+        "            return 1\n",
+        "        if any(k in s for k in ['safe', 'legit', 'ham', 'normal']):\n",
+        "            return 0\n",
+        "        return None\n",
+        "\n",
+        "    out = pd.DataFrame({'text': df[tcol].astype(str), 'label_raw': df[lcol]})\n",
+        "    out['label'] = out['label_raw'].apply(to_binary)\n",
+        "    out = out.dropna(subset=['label'])\n",
+        "    out['label'] = out['label'].astype(int)\n",
+        "    return out[['text', 'label']]\n",
+        "\n",
+        "df1 = normalize(df1_raw, \"Dataset 1\")\n",
+        "df2 = normalize(df2_raw, \"Dataset 2\")\n",
+        "\n",
+        "print(f\"\\nDataset 1: {len(df1)} rows  |  Phishing:{df1['label'].sum()}  Legit:{(df1['label']==0).sum()}\")\n",
+        "print(f\"Dataset 2: {len(df2)} rows  |  Phishing:{df2['label'].sum()}  Legit:{(df2['label']==0).sum()}\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 7 \u2014 Merge and clean"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "df = pd.concat([df1, df2], ignore_index=True)\n",
+        "df = df.drop_duplicates(subset=['text']).reset_index(drop=True)\n",
+        "df = df[df['text'].str.len() > 20].reset_index(drop=True)\n",
+        "\n",
+        "print(f\"Total merged rows: {len(df)}\")\n",
+        "print(f\"Phishing: {df['label'].sum()} ({df['label'].mean()*100:.1f}%)\")\n",
+        "print(f\"Legitimate: {(df['label']==0).sum()} ({(df['label']==0).mean()*100:.1f}%)\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 8 \u2014 PII Scrubbing"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "import re\n",
+        "\n",
+        "def scrub_pii(text: str) -> str:\n",
+        "    text = re.sub(r'[\\w.+-]+@[\\w-]+\\.[a-zA-Z]{2,}', '<EMAIL>', text)\n",
+        "    text = re.sub(r'(\\+?1[\\s.-]?)?\\(?\\d{3}\\)?[\\s.-]\\d{3}[\\s.-]\\d{4}', '<PHONE>', text)\n",
+        "    text = re.sub(r'https?://\\S+|www\\.\\S+', '<URL>', text)\n",
+        "    text = re.sub(r'\\b\\d{1,3}(?:\\.\\d{1,3}){3}\\b', '<IP>', text)\n",
+        "    return text.strip()\n",
+        "\n",
+        "df['text_clean'] = df['text'].apply(scrub_pii)\n",
+        "\n",
+        "stats = {\n",
+        "    'emails_removed': df['text_clean'].str.count('<EMAIL>').sum(),\n",
+        "    'urls_removed':   df['text_clean'].str.count('<URL>').sum(),\n",
+        "    'phones_removed': df['text_clean'].str.count('<PHONE>').sum(),\n",
+        "    'ips_removed':    df['text_clean'].str.count('<IP>').sum(),\n",
+        "}\n",
+        "print(\"PII Scrubbing Stats:\")\n",
+        "for k, v in stats.items():\n",
+        "    print(f\"  {k}: {v:,}\")\n",
+        "\n",
+        "print(\"\\nExample scrubbed email:\")\n",
+        "print(df['text_clean'].iloc[0][:300])"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 9 \u2014 Train/Test Split + TF-IDF\n",
+        "\n",
+        "TF-IDF converts text into numbers. Each word gets a score based on how distinctive it is across the corpus.\n",
+        "\n",
+        "**Important:** The vectorizer is fitted on training data only \u2014 never on test data."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "from sklearn.model_selection import train_test_split\n",
+        "from sklearn.feature_extraction.text import TfidfVectorizer\n",
+        "\n",
+        "X = df['text_clean']\n",
+        "y = df['label']\n",
+        "\n",
+        "X_train, X_test, y_train, y_test = train_test_split(\n",
+        "    X, y, test_size=0.2, random_state=42, stratify=y\n",
+        ")\n",
+        "\n",
+        "vectorizer = TfidfVectorizer(\n",
+        "    max_features=10000,\n",
+        "    ngram_range=(1, 2),\n",
+        "    sublinear_tf=True,\n",
+        "    stop_words='english'\n",
+        ")\n",
+        "\n",
+        "X_train_tfidf = vectorizer.fit_transform(X_train)\n",
+        "X_test_tfidf  = vectorizer.transform(X_test)\n",
+        "\n",
+        "print(f\"Train set:  {X_train_tfidf.shape}\")\n",
+        "print(f\"Test set:   {X_test_tfidf.shape}\")\n",
+        "print(f\"Vocabulary: {len(vectorizer.vocabulary_):,} terms\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 10 \u2014 Train Logistic Regression and Random Forest"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "from sklearn.linear_model import LogisticRegression\n",
+        "from sklearn.ensemble import RandomForestClassifier\n",
+        "\n",
+        "lr = LogisticRegression(max_iter=1000, C=1.0, random_state=42, class_weight='balanced')\n",
+        "rf = RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1, class_weight='balanced')\n",
+        "\n",
+        "print(\"Training Logistic Regression...\")\n",
+        "lr.fit(X_train_tfidf, y_train)\n",
+        "print(\"  Done.\")\n",
+        "\n",
+        "print(\"Training Random Forest (takes 2-4 minutes)...\")\n",
+        "rf.fit(X_train_tfidf, y_train)\n",
+        "print(\"  Done.\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 11 \u2014 Evaluate both models"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score\n",
+        "import matplotlib.pyplot as plt\n",
+        "\n",
+        "results = {}\n",
+        "\n",
+        "for name, clf in [('Logistic Regression', lr), ('Random Forest', rf)]:\n",
+        "    preds = clf.predict(X_test_tfidf)\n",
+        "    f1 = f1_score(y_test, preds, average='weighted')\n",
+        "    results[name] = {'model': clf, 'f1': f1, 'preds': preds}\n",
+        "\n",
+        "    print(f\"\\n{'='*60}\")\n",
+        "    print(f\"  {name}  \u2014  weighted F1: {f1:.4f}\")\n",
+        "    print('='*60)\n",
+        "    print(classification_report(y_test, preds, target_names=['Legitimate', 'Phishing']))\n",
+        "\n",
+        "    cm = confusion_matrix(y_test, preds)\n",
+        "    disp = ConfusionMatrixDisplay(cm, display_labels=['Legit', 'Phishing'])\n",
+        "    disp.plot(cmap='Blues')\n",
+        "    plt.title(f'{name} \u2014 F1: {f1:.3f}')\n",
+        "    plt.show()\n",
+        "\n",
+        "best_name = max(results, key=lambda k: results[k]['f1'])\n",
+        "best_model = results[best_name]['model']\n",
+        "print(f\"\\n>>> Best model: {best_name} (F1 = {results[best_name]['f1']:.4f})\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 12 \u2014 Save model.pkl and vectorizer.pkl"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "import joblib\n",
+        "\n",
+        "os.makedirs('model/artifacts', exist_ok=True)\n",
+        "joblib.dump(best_model, 'model/artifacts/model.pkl')\n",
+        "joblib.dump(vectorizer,  'model/artifacts/vectorizer.pkl')\n",
+        "\n",
+        "joblib.dump(best_model, '/content/drive/MyDrive/phishing_detector/model.pkl')\n",
+        "joblib.dump(vectorizer,  '/content/drive/MyDrive/phishing_detector/vectorizer.pkl')\n",
+        "\n",
+        "print(\"Saved:\")\n",
+        "print(\"  model/artifacts/model.pkl\")\n",
+        "print(\"  model/artifacts/vectorizer.pkl\")\n",
+        "print(\"  Drive backup complete\")"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "from google.colab import files\n",
+        "files.download('model/artifacts/model.pkl')\n",
+        "files.download('model/artifacts/vectorizer.pkl')"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 13 \u2014 Integration test"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "m = joblib.load('model/artifacts/model.pkl')\n",
+        "v = joblib.load('model/artifacts/vectorizer.pkl')\n",
+        "\n",
+        "test_emails = [\n",
+        "    \"URGENT: Your account has been compromised. Click here immediately to verify your identity or your account will be suspended within 24 hours.\",\n",
+        "    \"Hi team, attaching the notes from this morning's meeting. Let me know if you have any questions before Friday's deadline. Thanks!\",\n",
+        "    \"Dear customer, we noticed unusual activity on your PayPal account. Please confirm your password at http://paypa1-verify.com to secure your account.\"\n",
+        "]\n",
+        "\n",
+        "for i, email in enumerate(test_emails, 1):\n",
+        "    clean   = scrub_pii(email)\n",
+        "    pred    = m.predict(v.transform([clean]))[0]\n",
+        "    prob    = m.predict_proba(v.transform([clean]))[0][1]\n",
+        "    verdict = 'PHISHING' if pred == 1 else 'LEGITIMATE'\n",
+        "    print(f\"\\nEmail {i}: \\\"{email[:60]}...\\\"\")\n",
+        "    print(f\"  Verdict: {verdict}  (phishing confidence: {prob:.1%})\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 14 \u2014 Top 20 phishing indicator words"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "import numpy as np\n",
+        "\n",
+        "feature_names = vectorizer.get_feature_names_out()\n",
+        "\n",
+        "if best_name == 'Logistic Regression':\n",
+        "    top20 = pd.Series(best_model.coef_[0], index=feature_names).nlargest(20)\n",
+        "    print(\"Top 20 words/phrases that signal PHISHING (LR coefficients):\")\n",
+        "else:\n",
+        "    top20 = pd.Series(best_model.feature_importances_, index=feature_names).nlargest(20)\n",
+        "    print(\"Top 20 words/phrases (RF importances):\")\n",
+        "\n",
+        "print(top20.to_string())"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 14B \u2014 SHAP Explainability\n",
+        "\n",
+        "Shows **which specific words** drove each prediction.\n",
+        "Red words push toward phishing; blue words push toward legitimate.\n",
+        "\n",
+        "This addresses the model behavior transparency requirement."
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "import shap\n",
+        "import matplotlib.pyplot as plt\n",
+        "import numpy as np\n",
+        "\n",
+        "explainer = shap.LinearExplainer(\n",
+        "    best_model,\n",
+        "    X_train_tfidf,\n",
+        "    feature_perturbation='interventional'\n",
+        ")\n",
+        "\n",
+        "feature_names = vectorizer.get_feature_names_out()\n",
+        "\n",
+        "y_test_arr   = np.array(y_test)\n",
+        "test_indices = np.arange(len(y_test_arr))\n",
+        "\n",
+        "phish_pos = test_indices[y_test_arr == 1][0]\n",
+        "legit_pos  = test_indices[y_test_arr == 0][0]\n",
+        "\n",
+        "for label_name, pos in [(\"PHISHING\", phish_pos), (\"LEGITIMATE\", legit_pos)]:\n",
+        "    sample    = X_test_tfidf[pos]\n",
+        "    shap_vals = explainer.shap_values(sample)\n",
+        "    vals_1d   = np.array(shap_vals).flatten()\n",
+        "\n",
+        "    word_impacts = pd.Series(vals_1d, index=feature_names)\n",
+        "\n",
+        "    print(f\"\\n{'='*55}\")\n",
+        "    print(f\"  SHAP Explanation \u2014 {label_name} email\")\n",
+        "    print(f\"{'='*55}\")\n",
+        "    print(\"Top 10 words PUSHING TOWARD phishing:\")\n",
+        "    print(word_impacts.nlargest(10).to_string())\n",
+        "    print(\"\\nTop 10 words PUSHING TOWARD legitimate:\")\n",
+        "    print(word_impacts.nsmallest(10).to_string())\n",
+        "\n",
+        "    sample_dense = sample.toarray().flatten()\n",
+        "    expected_val = explainer.expected_value\n",
+        "    if hasattr(expected_val, '__len__'):\n",
+        "        expected_val = float(expected_val[1])\n",
+        "\n",
+        "    shap.force_plot(\n",
+        "        expected_val,\n",
+        "        vals_1d,\n",
+        "        sample_dense,\n",
+        "        feature_names=feature_names,\n",
+        "        matplotlib=True,\n",
+        "        show=False,\n",
+        "        figsize=(18, 4)\n",
+        "    )\n",
+        "    plt.title(f\"SHAP Force Plot \u2014 {label_name} email\", fontsize=13)\n",
+        "    plt.tight_layout()\n",
+        "    plt.savefig(f'shap_{label_name.lower()}.png', dpi=150, bbox_inches='tight')\n",
+        "    plt.show()\n",
+        "    print(f\"Saved: shap_{label_name.lower()}.png\")\n",
+        "\n",
+        "from google.colab import files\n",
+        "files.download('shap_phishing.png')\n",
+        "files.download('shap_legitimate.png')\n",
+        "print(\"\\nSHAP images downloaded.\")"
+      ]
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "## Step 15 \u2014 Summary"
+      ]
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "execution_count": null,
+      "outputs": [],
+      "source": [
+        "phishing_f1 = classification_report(y_test, results[best_name]['preds'], output_dict=True)['1']['f1-score']\n",
+        "\n",
+        "summary = f\"\"\"\n",
+        "=== MODEL BUILDER SUMMARY \u2014 PHASE 4 ===\n",
+        "\n",
+        "DATASETS\n",
+        "  Source 1 (naserabdullahalam):         {len(df1):,} rows\n",
+        "  Source 2 (francescogreco97, LLM-gen): {len(df2):,} rows\n",
+        "  Merged + deduplicated:                {len(df):,} rows\n",
+        "  Class balance: {df['label'].mean()*100:.1f}% phishing, {(df['label']==0).mean()*100:.1f}% legitimate\n",
+        "\n",
+        "PII SCRUBBING\n",
+        "  Emails removed: {stats['emails_removed']:,}\n",
+        "  URLs removed:   {stats['urls_removed']:,}\n",
+        "  Phones removed: {stats['phones_removed']:,}\n",
+        "  IPs removed:    {stats['ips_removed']:,}\n",
+        "\n",
+        "MODEL COMPARISON (weighted F1 on test set)\n",
+        "  Logistic Regression: {results['Logistic Regression']['f1']:.4f}\n",
+        "  Random Forest:       {results['Random Forest']['f1']:.4f}\n",
+        "  Selected model:      {best_name}\n",
+        "  F1 on phishing class: {phishing_f1:.4f}\n",
+        "\n",
+        "ARTIFACTS\n",
+        "  model/artifacts/model.pkl\n",
+        "  model/artifacts/vectorizer.pkl\n",
+        "  shap_phishing.png\n",
+        "  shap_legitimate.png\n",
+        "\"\"\"\n",
+        "\n",
+        "print(summary)"
+      ]
+    }
+  ]
+}
