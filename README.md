@@ -29,6 +29,7 @@ User Input → PII Scrubbing → TF-IDF Vectorization → Classifier → Verdict
 3. Text is converted into a 10,000-feature TF-IDF vector
 4. Logistic Regression predicts phishing or legitimate
 5. Result is displayed with a confidence score
+6. SHAP highlights the specific words that drove each prediction
 
 ---
 
@@ -148,7 +149,6 @@ Potential deployment options:
 
 ## Future Improvements
 
-* SHAP explainability for highlighting suspicious words
 * Transformer-based models (e.g., BERT)
 * Multi-language support
 * Continuous retraining for evolving phishing tactics
